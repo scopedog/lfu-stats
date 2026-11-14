@@ -1,4 +1,4 @@
-lfu-stats: 1 device(s), 600360 objects seen, 600104 reported, 0 skipped, 0.15 s (4136661 objects/s), max RSS 42 MB
+lfu-stats: 1 device(s), 600360 objects seen, 600104 reported, 0 skipped, 0.20 s (3039420 objects/s), max RSS 46 MB
 500000 files, 100101 directories (0 shards), 0 symlinks, 0 other; 0 without a name
 file sizes: 500000 strict SOM or inode, 0 lazy SOM, 0 unknown (counted as 0)
 total 414.46 MB used to store 414.46 MB user data, overhead 0.00%
@@ -43,19 +43,19 @@ link count: 500000 items, average 1.00 links, min 1, max 1
 
 symlink target length: 0 items, average 0.00 chars, min 0, max 0
 
-mtime age (files): 500000 items, average 0.12 days, min 0, max 0
+mtime age (files): 500000 items, average 0.04 days, min 0, max 0
            min          max        count       %    cum%    val%
              0            2       500000 100.00% 100.00% 100.00%
 
 mtime age (KB): 0 items, average 0.00 days, min 0, max 0
 
-ctime age (files): 500000 items, average 0.12 days, min 0, max 0
+ctime age (files): 500000 items, average 0.04 days, min 0, max 0
            min          max        count       %    cum%    val%
              0            2       500000 100.00% 100.00% 100.00%
 
 ctime age (KB): 0 items, average 0.00 days, min 0, max 0
 
-atime age (files): 500000 items, average 0.12 days, min 0, max 0
+atime age (files): 500000 items, average 0.04 days, min 0, max 0
            min          max        count       %    cum%    val%
              0            2       500000 100.00% 100.00% 100.00%
 

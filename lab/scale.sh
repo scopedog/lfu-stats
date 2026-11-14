@@ -23,6 +23,7 @@ for i in $(seq 1 "$K"); do
 		sudo $CM -m $M/t$i/d$j/f 500 > /dev/null
 	done
 done
+sync	# llmountcleanup.sh unmounts the client with -f
 lfs df -i $M | grep MDT
 echo "== unmount $(date)"
 sudo -E bash $TESTS/llmountcleanup.sh > scale-cleanup.log 2>&1

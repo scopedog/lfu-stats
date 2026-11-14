@@ -47,6 +47,9 @@ done
 # DoM: data on the MDT, size from the inode
 lfs setstripe -E 1M -L mdt -E -1 docs/dom
 dd if=/dev/urandom of=docs/dom bs=1k count=100 status=none
+# DoM and OST data in one file: lfu-stats counts it, without its MDT part
+lfs setstripe -E 64K -L mdt -E -1 -c 1 docs/dom_ost
+dd if=/dev/urandom of=docs/dom_ost bs=1k count=1024 status=none
 
 # DNE: a remote directory and a striped one
 lfs mkdir -i 1 remote

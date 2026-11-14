@@ -2,7 +2,8 @@
 # Lab check of lfu-stats against fsstats on the same filesystem.
 #   1. format + mount a 2-MDT test fs (FSNAME=lfss), fill it
 #   2. fsstats over the client mount: the oracle
-#   3. unmount everything, lfu-stats over the two MDT images
+#   3. unmount everything, lfu-stats over the MDT images, with and without
+#      the two OSTs (rescan.sh)
 # usage: run.sh TREE WORKDIR   (TREE: a built Lustre tree with the scan API)
 set -eu
 T=${1:?tree}
@@ -32,18 +33,15 @@ sudo -E bash $TESTS/llmountcleanup.sh > cleanup.log 2>&1
 mount | grep lfss || true
 
 echo "== lfu-stats $(date)"
+# prove the scan opens the tree's plugin, not a stale installed one
 sudo mount --bind "$T/lustre/utils/scan_osd_ldiskfs.so" $PLUG
-trap 'sudo umount $PLUG' EXIT
-md5sum "$T/lustre/utils/scan_osd_ldiskfs.so" $PLUG
 sudo env LD_LIBRARY_PATH=$LD_LIBRARY_PATH strace -f -e trace=openat \
 	-o strace.out ./lfu-stats -t 1 -n 3 /tmp/lfss-mdt1 > /dev/null
 grep scan_osd strace.out
-sudo env LD_LIBRARY_PATH=$LD_LIBRARY_PATH ./lfu-stats --now "$(cat now)" \
-	-c lfu.csv /tmp/lfss-mdt1 /tmp/lfss-mdt2 > lfu.txt
+sudo umount $PLUG
+bash "$W/rescan.sh" "$T" "$W"
 for i in 1 2; do
-	sudo env LD_LIBRARY_PATH=$LD_LIBRARY_PATH ./lfu-stats \
-		--now "$(cat now)" -c lfu-mdt$i.csv /tmp/lfss-mdt$i > lfu-mdt$i.txt
+	sudo env LD_LIBRARY_PATH=$LD_LIBRARY_PATH ./lfu-stats --now "$(cat now)" \
+		-c lfu-mdt$i.csv /tmp/lfss-mdt$i > lfu-mdt$i.txt
 done
-head -4 lfu.txt
-diff fsstats.csv lfu.csv > csv.diff || true
-wc -l csv.diff
+sed -n 1,8p lfu.txt

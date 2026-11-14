@@ -1,5 +1,6 @@
 #!/bin/bash
-# Rebuild lfu-stats and rescan the images run.sh left, without touching them.
+# Rebuild lfu-stats and rescan the images run.sh left, without touching them:
+# MDTs only, then with the OST pass, then the two wrong-target checks.
 # usage: rescan.sh TREE WORKDIR
 set -eu
 T=${1:?tree}
@@ -12,7 +13,16 @@ L=$T/lustre/utils/.libs
 sudo mount --bind "$T/lustre/utils/scan_osd_ldiskfs.so" $PLUG
 trap 'sudo umount $PLUG' EXIT
 cmp "$T/lustre/utils/scan_osd_ldiskfs.so" $PLUG
-sudo env LD_LIBRARY_PATH=$L ./lfu-stats --now "$(cat now)" -c lfu.csv \
+run() { sudo env LD_LIBRARY_PATH=$L ./lfu-stats --now "$(cat now)" "$@"; }
+
+run -c lfu-mdtonly.csv /tmp/lfss-mdt1 /tmp/lfss-mdt2 > lfu-mdtonly.txt
+run -c lfu.csv --ost /tmp/lfss-ost1 --ost /tmp/lfss-ost2 \
 	/tmp/lfss-mdt1 /tmp/lfss-mdt2 > lfu.txt
+diff fsstats.csv lfu-mdtonly.csv > csv-mdtonly.diff || true
 diff fsstats.csv lfu.csv > csv.diff || true
-wc -l < csv.diff
+echo "diff lines: MDT only $(wc -l < csv-mdtonly.diff), with OSTs $(wc -l < csv.diff)"
+
+echo "-- an OST given as an MDT, and an MDT given as an OST (both must fail):"
+run /tmp/lfss-ost1 > /dev/null && echo "UNEXPECTED: accepted"
+run --ost /tmp/lfss-mdt1 /tmp/lfss-mdt2 > /dev/null && echo "UNEXPECTED: accepted"
+true

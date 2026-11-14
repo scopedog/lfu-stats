@@ -267,6 +267,7 @@ static void histo_text(FILE *f, const struct histo *h, int i)
 
 #define D_SEEN	0x1	/* the directory object itself was scanned */
 #define D_SHARD	0x2	/* a stripe of a striped directory; parent is the master */
+#define D_STRIPED 0x4	/* a striped directory: size and blocks are its shards' */
 
 struct dent {
 	struct lu_fid	fid;
@@ -275,6 +276,7 @@ struct dent {
 	uint64_t	nent;	/* linkea entries naming this as parent */
 	uint64_t	bytes;	/* file sizes directly beneath, first link */
 	uint64_t	dsize;	/* directory inode size, shards folded in */
+	uint64_t	dblocks; /* a striped directory's shards' blocks */
 	uint32_t	flags;
 };
 
@@ -358,6 +360,7 @@ static void dent_merge(struct dent *d, const struct dent *s)
 	d->nent += s->nent;
 	d->bytes += s->bytes;
 	d->dsize += s->dsize;
+	d->dblocks += s->dblocks;
 	if (s->flags & D_SHARD)
 		d->parent = s->parent;
 	if ((s->flags & D_SEEN) && !(d->flags & D_SEEN)) {
@@ -370,6 +373,72 @@ static void dent_merge(struct dent *d, const struct dent *s)
 }
 
 /* ---------------------------------------------------------------- */
+/* OST pass: blocks per owning MDT file, from each object's trusted.fid */
+
+struct oent {
+	struct lu_fid	fid;	/* the MDT file owning the objects */
+	uint64_t	blocks;	/* 512-byte blocks, all its objects */
+	uint32_t	nobj;
+	uint32_t	matched; /* a scanned MDT file took these blocks */
+};
+
+struct otab {
+	struct oent	*e;
+	size_t		cap, used;
+};
+
+static struct oent *otab_slot(const struct otab *t, const struct lu_fid *fid)
+{
+	size_t i = fid_hash(fid) & (t->cap - 1);
+
+	while (t->e[i].fid.f_seq != 0 && !fid_eq(&t->e[i].fid, fid))
+		i = (i + 1) & (t->cap - 1);
+	return &t->e[i];
+}
+
+static struct oent *otab_get(struct otab *t, const struct lu_fid *fid)
+{
+	struct oent *o;
+
+	if (t->used * 2 >= t->cap) {
+		struct otab n = { .cap = t->cap ? t->cap * 2 : 1024 };
+		size_t i;
+
+		n.e = calloc(n.cap, sizeof(*n.e));
+		if (n.e == NULL) {
+			perror("lfu-stats: owner table");
+			exit(1);
+		}
+		for (i = 0; i < t->cap; i++)
+			if (t->e[i].fid.f_seq != 0)
+				*otab_slot(&n, &t->e[i].fid) = t->e[i];
+		n.used = t->used;
+		free(t->e);
+		*t = n;
+	}
+	o = otab_slot(t, fid);
+	if (o->fid.f_seq == 0) {
+		o->fid = *fid;
+		t->used++;
+	}
+	return o;
+}
+
+static struct oent *otab_find(const struct otab *t, const struct lu_fid *fid)
+{
+	struct oent *o;
+
+	if (t->cap == 0)
+		return NULL;
+	o = otab_slot(t, fid);
+	return o->fid.f_seq == 0 ? NULL : o;
+}
+
+/* filled by the OST scans, then only read (and marked) by the MDT scans */
+static struct otab ost_all;
+static int have_ost;
+
+/* ---------------------------------------------------------------- */
 /* per-thread state, merged when the scans end */
 
 struct tstate {
@@ -378,6 +447,10 @@ struct tstate {
 	double		total_kb, total_cap_kb;
 	uint64_t	special, hlink_skipped, files, dirs_seen, symlinks;
 	uint64_t	shards, no_name, size_strict, size_lazy, size_none;
+	/* OST pass */
+	struct otab	owners;
+	uint64_t	ost_objs, ost_unowned, ost_blocks;
+	uint64_t	cap_ost, cap_lazy, dom_plus_ost;
 	struct tstate	*next;
 };
 
@@ -455,6 +528,65 @@ static int linkea_next(const void *buf, size_t len, size_t *off,
 
 /* ---------------------------------------------------------------- */
 
+static int ost_filter(const struct llapi_scan_rec *rec, void *data)
+{
+	return (rec->lfsr_valid & LLAPI_SCAN_CLASS) &&
+	       rec->lfsr_class != LLAPI_SCAN_CLS_OST_OBJ;
+}
+
+static int ost_cb(const struct llapi_scan_rec *rec, void *data)
+{
+	struct tstate *t = ts_get();
+	uint64_t blocks = (rec->lfsr_stx.stx_mask & STATX_BLOCKS) ?
+			  rec->lfsr_stx.stx_blocks : 0;
+	struct oent *o;
+
+	t->ost_objs++;
+	t->ost_blocks += blocks;
+	/* precreated and never written: no owner, and no data */
+	if (!(rec->lfsr_valid & LLAPI_SCAN_OWNER)) {
+		t->ost_unowned++;
+		return 0;
+	}
+	o = otab_get(&t->owners, &rec->lfsr_owner_fid);
+	o->blocks += blocks;
+	o->nobj++;
+	return 0;
+}
+
+/*
+ * The end of an instantiated Data-on-MDT component, from the raw
+ * trusted.lov, or 0 if there is none.  A file with data past it on OSTs
+ * has written that whole component, so its MDT blocks are about this many
+ * bytes, unless the component has holes.
+ */
+static uint64_t lov_dom_end(const void *buf, size_t len)
+{
+	const struct lov_comp_md_v1 *comp = buf;
+	const struct lov_user_md_v1 *v1;
+	unsigned int i, count;
+
+	if (buf == NULL || len < sizeof(*comp) ||
+	    comp->lcm_magic != LOV_USER_MAGIC_COMP_V1)
+		return 0;
+	count = comp->lcm_entry_count;
+	if (len < sizeof(*comp) + count * sizeof(comp->lcm_entries[0]))
+		return 0;
+	for (i = 0; i < count; i++) {
+		uint32_t off = comp->lcm_entries[i].lcme_offset;
+
+		if (!(comp->lcm_entries[i].lcme_flags & LCME_FL_INIT) ||
+		    off > len - sizeof(*v1))
+			continue;
+		v1 = (const struct lov_user_md_v1 *)((const char *)buf + off);
+		/* a DoM component ends before any OST one: EOF is not a size */
+		if ((v1->lmm_pattern & LOV_PATTERN_MDT) &&
+		    comp->lcm_entries[i].lcme_extent.e_end != LUSTRE_EOF)
+			return comp->lcm_entries[i].lcme_extent.e_end;
+	}
+	return 0;
+}
+
 static int filter(const struct llapi_scan_rec *rec, void *data)
 {
 	/* only what the namespace can reach: no agents, orphans, internals */
@@ -515,7 +647,9 @@ static int scan_cb(const struct llapi_scan_rec *rec, void *data)
 		if ((rec->lfsr_valid & LLAPI_SCAN_LINKEA) &&
 		    linkea_next(rec->lfsr_linkea, rec->lfsr_linkeasize, &off,
 				&parent, &name, &namelen)) {
-			dtab_get(&t->dirs, &parent)->dsize += st->stx_size;
+			d = dtab_get(&t->dirs, &parent);
+			d->dsize += st->stx_size;
+			d->dblocks += st->stx_blocks;
 			/* entries name the shard as parent: folded at the end */
 			d = dtab_get(&t->dirs, &rec->lfsr_fid);
 			d->flags |= D_SHARD;
@@ -530,6 +664,41 @@ static int scan_cb(const struct llapi_scan_rec *rec, void *data)
 	cap_kb = ((st->stx_mask & STATX_BLOCKS) ||
 		  (rec->lfsr_valid & LLAPI_SCAN_LAZY_BLOCKS)) ?
 		 st->stx_blocks / 2.0 : 0;
+	if (type == S_IFREG && have_ost) {
+		struct oent *o = otab_find(&ost_all, &rec->lfsr_fid);
+
+		if (o != NULL) {
+			/* what a client's stat sums: every object's blocks */
+			cap_kb = o->blocks / 2.0;
+			o->matched = 1;
+			t->cap_ost++;
+			if (rec->lfsr_valid & LLAPI_SCAN_LAYOUT) {
+				uint64_t dom = lov_dom_end(rec->lfsr_lmm,
+							   rec->lfsr_lmmsize);
+
+				if (dom != 0) {
+					cap_kb += dom / 1024.0;
+					t->dom_plus_ost++;
+				}
+			}
+		} else if (!(st->stx_mask & STATX_BLOCKS)) {
+			t->cap_lazy++;
+		}
+	}
+
+	/* a striped directory has no size of its own: counted at the end */
+	if (type == S_IFDIR && (rec->lfsr_valid & LLAPI_SCAN_LMV) &&
+	    !(rec->lfsr_valid & LLAPI_SCAN_LMV_FOREIGN) &&
+	    rec->lfsr_lmv != NULL && rec->lfsr_lmv->lum_stripe_count > 1) {
+		t->dirs_seen++;
+		d = dtab_get(&t->dirs, &rec->lfsr_fid);
+		d->flags |= D_SEEN | D_STRIPED;
+		if (nlinks > 0) {
+			d->parent = first_parent;
+			d->name = strndup(first_name, first_namelen);
+		}
+		return 0;
+	}
 
 	if (type == S_IFREG || type == S_IFDIR || type == S_IFLNK) {
 		double ovhd = cap_kb >= size_kb ? cap_kb - size_kb :
@@ -673,10 +842,14 @@ static void print_top(FILE *f, const struct dtab *t, int n, int by)
 static void usage(const char *prog)
 {
 	fprintf(stderr,
-"usage: %s [-t THREADS] [-n TOP] [-c CSVFILE] [--now EPOCH] DEVICE...\n"
-"  Scan each MDT DEVICE (unmounted, or a snapshot) and report fsstats-style\n"
+"usage: %s [-t THREADS] [-n TOP] [-c CSVFILE] [--now EPOCH] [--ost OSTDEV]...\n"
+"       MDTDEV...\n"
+"  Scan each MDT (unmounted, or a snapshot) and report fsstats-style\n"
 "  histograms plus the largest TOP directories (default 20).  Several MDTs\n"
-"  of one filesystem merge into one report.\n", prog);
+"  of one filesystem merge into one report.  With --ost, each OST given is\n"
+"  scanned first and files take their capacity from their OST objects\n"
+"  instead of the MDT's lazy size-on-MDT; give every OST for exact figures.\n",
+		prog);
 }
 
 int main(int argc, char **argv)
@@ -686,12 +859,15 @@ int main(int argc, char **argv)
 		{ "top", required_argument, NULL, 'n' },
 		{ "csv", required_argument, NULL, 'c' },
 		{ "now", required_argument, NULL, 'N' },
+		{ "ost", required_argument, NULL, 'O' },
 		{ "help", no_argument, NULL, 'h' },
 		{ NULL }
 	};
 	struct tstate all = { 0 }, *t;
 	int threads = 4, top = 20, i, c, rc = 0;
-	const char *csv = NULL;
+	const char *csv = NULL, **osts = NULL;
+	int nost = 0;
+	uint64_t unmatched_objs = 0, unmatched_blocks = 0;
 	struct timespec t0, t1;
 	uint64_t seen = 0, emitted = 0, skipped = 0;
 	char b1[32], b2[32];
@@ -700,12 +876,16 @@ int main(int argc, char **argv)
 	size_t j;
 
 	now = time(NULL);
-	while ((c = getopt_long(argc, argv, "t:n:c:h", opts, NULL)) != -1) {
+	osts = calloc(argc, sizeof(*osts));
+	if (osts == NULL)
+		return 1;
+	while ((c = getopt_long(argc, argv, "t:n:c:O:h", opts, NULL)) != -1) {
 		switch (c) {
 		case 't': threads = atoi(optarg); break;
 		case 'n': top = atoi(optarg); break;
 		case 'c': csv = optarg; break;
 		case 'N': now = atoll(optarg); break;
+		case 'O': osts[nost++] = optarg; break;
 		default: usage(argv[0]); return c == 'h' ? 0 : 2;
 		}
 	}
@@ -715,8 +895,59 @@ int main(int argc, char **argv)
 	}
 
 	clock_gettime(CLOCK_MONOTONIC, &t0);
+	for (i = 0; i < nost; i++) {
+		struct llapi_scan_stats ss = { .ss_size = sizeof(ss) };
+		__u64 got = 0;
+		struct llapi_scan_param sp = {
+			.lfsp_size = sizeof(sp),
+			.lfsp_want = LLAPI_SCAN_BLOCKS | LLAPI_SCAN_CLASS |
+				     LLAPI_SCAN_OWNER,
+			.lfsp_filter = ost_filter,
+			.lfsp_thread_count = threads,
+			.lfsp_got = &got,
+			.lfsp_stats = &ss,
+		};
+
+		rc = llapi_scan_device(osts[i], &sp, ost_cb, NULL);
+		if (rc < 0) {
+			fprintf(stderr, "lfu-stats: %s: %s\n", osts[i],
+				strerror(-rc));
+			return 1;
+		}
+		if (!(got & LLAPI_SCAN_OWNER)) {
+			fprintf(stderr, "lfu-stats: %s: not an OST\n", osts[i]);
+			return 1;
+		}
+		seen += ss.ss_seen;
+		emitted += ss.ss_emitted;
+		skipped += ss.ss_skipped;
+	}
+	/* one owner table, the largest thread's adopted, read by the MDT pass */
+	for (t = ts_list; t != NULL; t = t->next)
+		if (t->owners.used > ost_all.used) {
+			struct otab x = ost_all;
+
+			ost_all = t->owners;
+			t->owners = x;
+		}
+	for (t = ts_list; t != NULL; t = t->next) {
+		for (j = 0; j < t->owners.cap; j++) {
+			struct oent *s = &t->owners.e[j], *o;
+
+			if (s->fid.f_seq == 0)
+				continue;
+			o = otab_get(&ost_all, &s->fid);
+			o->blocks += s->blocks;
+			o->nobj += s->nobj;
+		}
+		free(t->owners.e);
+		t->owners = (struct otab){ 0 };
+	}
+	have_ost = nost > 0;
+
 	for (i = optind; i < argc; i++) {
 		struct llapi_scan_stats ss = { .ss_size = sizeof(ss) };
+		__u64 got = 0;
 		struct llapi_scan_param sp = {
 			.lfsp_size = sizeof(sp),
 			.lfsp_want = LLAPI_SCAN_TYPE | LLAPI_SCAN_MODE |
@@ -726,9 +957,11 @@ int main(int argc, char **argv)
 				     LLAPI_SCAN_ATIME | LLAPI_SCAN_MTIME |
 				     LLAPI_SCAN_CTIME | LLAPI_SCAN_FID |
 				     LLAPI_SCAN_CLASS | LLAPI_SCAN_LINKEA |
-				     LLAPI_SCAN_LMV,
+				     LLAPI_SCAN_LMV |
+				     (have_ost ? LLAPI_SCAN_LAYOUT : 0),
 			.lfsp_filter = filter,
 			.lfsp_thread_count = threads,
+			.lfsp_got = &got,
 			.lfsp_stats = &ss,
 		};
 
@@ -736,6 +969,11 @@ int main(int argc, char **argv)
 		if (rc < 0) {
 			fprintf(stderr, "lfu-stats: %s: %s\n", argv[i],
 				strerror(-rc));
+			return 1;
+		}
+		if ((got & LLAPI_SCAN_OWNER) || !(got & LLAPI_SCAN_LMV)) {
+			fprintf(stderr, "lfu-stats: %s: not an MDT%s\n", argv[i],
+				(got & LLAPI_SCAN_OWNER) ? "; give an OST with --ost" : "");
 			return 1;
 		}
 		seen += ss.ss_seen;
@@ -771,6 +1009,12 @@ int main(int argc, char **argv)
 		all.size_strict += t->size_strict;
 		all.size_lazy += t->size_lazy;
 		all.size_none += t->size_none;
+		all.ost_objs += t->ost_objs;
+		all.ost_unowned += t->ost_unowned;
+		all.ost_blocks += t->ost_blocks;
+		all.cap_ost += t->cap_ost;
+		all.cap_lazy += t->cap_lazy;
+		all.dom_plus_ost += t->dom_plus_ost;
 		for (j = 0; j < t->dirs.cap; j++)
 			if (t->dirs.e[j].fid.f_seq != 0)
 				dent_merge(dtab_get(&all.dirs,
@@ -793,6 +1037,11 @@ int main(int argc, char **argv)
 		m->bytes += s->bytes;
 		s->nent = s->bytes = 0;
 	}
+	for (j = 0; j < ost_all.cap; j++)
+		if (ost_all.e[j].fid.f_seq != 0 && !ost_all.e[j].matched) {
+			unmatched_objs += ost_all.e[j].nobj;
+			unmatched_blocks += ost_all.e[j].blocks;
+		}
 	/* fsstats counts every directory it walks, entries or not */
 	for (j = 0; j < all.dirs.cap; j++) {
 		struct dent *d = &all.dirs.e[j];
@@ -801,6 +1050,16 @@ int main(int argc, char **argv)
 			continue;
 		histo_add(&all.h[H_DIR_ENTS], d->nent, 1);
 		histo_add(&all.h[H_DIR_KB], d->dsize / 1024.0, 1);
+		if (d->flags & D_STRIPED) {
+			double size_kb = d->dsize / 1024.0;
+			double cap_kb = d->dblocks / 2.0;
+
+			histo_add_key(&all.h[cap_kb >= size_kb ? H_POS_OVHD :
+					     H_NEG_OVHD], size_kb,
+				      fabs(cap_kb - size_kb), 1);
+			all.total_kb += size_kb;
+			all.total_cap_kb += cap_kb;
+		}
 	}
 
 	if (csv != NULL) {
@@ -838,7 +1097,7 @@ int main(int argc, char **argv)
 	getrusage(RUSAGE_SELF, &ru);
 	printf("lfu-stats: %d device(s), %"PRIu64" objects seen, %"PRIu64
 	       " reported, %"PRIu64" skipped, %.2f s (%.0f objects/s), "
-	       "max RSS %ld MB\n", argc - optind, seen, emitted, skipped,
+	       "max RSS %ld MB\n", argc - optind + nost, seen, emitted, skipped,
 	       secs, secs > 0 ? seen / secs : 0, ru.ru_maxrss / 1024);
 	printf("%"PRIu64" files, %"PRIu64" directories (%"PRIu64" shards), "
 	       "%"PRIu64" symlinks, %"PRIu64" other; %"PRIu64" without a name\n",
@@ -847,6 +1106,20 @@ int main(int argc, char **argv)
 	printf("file sizes: %"PRIu64" strict SOM or inode, %"PRIu64" lazy SOM, "
 	       "%"PRIu64" unknown (counted as 0)\n",
 	       all.size_strict, all.size_lazy, all.size_none);
+	if (have_ost) {
+		printf("OST pass: %d OST(s), %"PRIu64" objects, %s; %"PRIu64
+		       " without an owner\n", nost, all.ost_objs,
+		       kb_str(all.ost_blocks / 2.0, b1, sizeof(b1)),
+		       all.ost_unowned);
+		printf("capacity: %"PRIu64" files from their OST objects; %"
+		       PRIu64" from lazy SOM, having no owned OST object (never"
+		       " written, or on an OST not given); %"PRIu64" with DoM"
+		       " and OST data, the MDT part estimated from the DoM size\n",
+		       all.cap_ost, all.cap_lazy, all.dom_plus_ost);
+		printf("OST objects owned by no scanned MDT file: %"PRIu64", %s\n",
+		       unmatched_objs, kb_str(unmatched_blocks / 2.0, b1,
+					     sizeof(b1)));
+	}
 	printf("total %s used to store %s user data, overhead %.2f%%\n\n",
 	       kb_str(all.total_cap_kb, b1, sizeof(b1)),
 	       kb_str(all.total_kb, b2, sizeof(b2)),

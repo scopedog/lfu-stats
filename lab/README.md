@@ -8,7 +8,8 @@ has the LFU device scanner. Copy `lfu-stats.c`, these scripts and `fsstats`
   fills it with `populate.sh`, runs fsstats over the client mount as the
   oracle, unmounts it, and runs lfu-stats over both MDT images. Leaves
   `csv.diff`.
-- `rescan.sh TREE WORKDIR` rebuilds lfu-stats and rescans the same images.
+- `rescan.sh TREE WORKDIR` rebuilds lfu-stats and rescans the same images: MDTs
+  only, then with `--ost`, then checks that a wrong-kind device is refused.
 - `scale.sh TREE WORKDIR K` builds a 1-MDT filesystem with K x 1000
   directories and K x 5000 files and measures time and memory.
 - `rescale.sh TREE WORKDIR TAG` rescans that image.
@@ -22,3 +23,10 @@ Expected differences from fsstats, on the 2026-11-14 run: capacity used and
 over/underhead (lazy SOM blocks), filename length (fsstats counts its start
 path `.`), the relative/absolute symlink split (not available), and the time
 averages (seconds between the two runs).
+
+`scale-ost.sh TREE WORKDIR K` builds a 1-MDT, 1-OST filesystem with K x 1000
+files that each hold 1 byte, and measures the OST pass. It syncs before
+`llmountcleanup.sh`. That script stops the client with `umount -f`, which
+drops dirty pages: without the sync, 11% of the files lost their data while
+their SOM still recorded it. The OST pass reported exactly that, which is
+how the problem was found.
