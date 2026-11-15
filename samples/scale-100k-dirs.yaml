@@ -1,0 +1,31 @@
+scan_stats:
+- mdts:             [ "/tmp/lfsb-mdt1" ]
+  snapshot_time:    1794702840
+  elapsed_time:     0.256
+  objects:          { seen: 600360, reported: 600104, skipped: 0 }
+  types:            { files: 500000, dirs: 100101, dir_shards: 0, symlinks: 0, other: 0, unnamed: 0 }
+  size_source:      { exact: 500000, lazy_som: 0, unknown: 0 }
+  file_size:        { samples: 500000, unit: bytes, min: 0, max: 0, sum: 0, hist: { 0: 500000 }, hist_bytes: { 0: 0 } }
+  file_allocated:   { samples: 500000, unit: bytes, min: 0, max: 0, sum: 0, hist: { 0: 500000 }, hist_bytes: { 0: 0 } }
+  file_overhead:    { samples: 500000, unit: bytes, min: 0, max: 0, sum: 0, hist: { 0: 500000 }, hist_bytes: { 0: 0 } }
+  file_sparse:      { samples: 0, unit: bytes, min: 0, max: 0, sum: 0, hist: {  }, hist_bytes: {  } }
+  dir_entries:      { samples: 100101, unit: entries, min: 0, max: 1000, sum: 600100, hist: { 0: 99000, 64: 1, 256: 1000, 512: 100 } }
+  dir_size:         { samples: 100101, unit: bytes, min: 4096, max: 45056, sum: 434589696, hist: { 4K: 99001, 16K: 1000, 32K: 100 } }
+  name_length:      { samples: 600100, unit: chars, min: 2, max: 4, sum: 2279292, hist: { 2: 110099, 4: 490001 } }
+  file_links:       { samples: 500000, unit: links, min: 1, max: 1, sum: 500000, hist: { 1: 500000 } }
+  symlink_length:   { samples: 0, unit: chars, min: 0, max: 0, sum: 0, hist: {  } }
+  mtime_age:        { samples: 500000, unit: secs, min: 12783, max: 12917, sum: 6424957247, hist: { 1h: 500000 }, hist_bytes: { 1h: 0 } }
+  ctime_age:        { samples: 500000, unit: secs, min: 12783, max: 12917, sum: 6424957247, hist: { 1h: 500000 }, hist_bytes: { 1h: 0 } }
+  atime_age:        { samples: 500000, unit: secs, min: 12783, max: 12917, sum: 6424957247, hist: { 1h: 500000 }, hist_bytes: { 1h: 0 } }
+  largest_dirs_by_entries:
+  - { entries: 1000, file_bytes: 0, dir_size: 45056, path: "/t93" }
+  - { entries: 1000, file_bytes: 0, dir_size: 45056, path: "/t27" }
+  - { entries: 1000, file_bytes: 0, dir_size: 45056, path: "/t41" }
+  - { entries: 1000, file_bytes: 0, dir_size: 45056, path: "/t63" }
+  - { entries: 1000, file_bytes: 0, dir_size: 45056, path: "/t49" }
+  largest_dirs_by_bytes:
+  - { entries: 0, file_bytes: 0, dir_size: 4096, path: "/t14/d703" }
+  - { entries: 0, file_bytes: 0, dir_size: 4096, path: "/t86/d962" }
+  - { entries: 0, file_bytes: 0, dir_size: 4096, path: "/t48/d346" }
+  - { entries: 0, file_bytes: 0, dir_size: 4096, path: "/t38/d811" }
+  - { entries: 0, file_bytes: 0, dir_size: 4096, path: "/t72/d65" }

@@ -1,0 +1,45 @@
+scan_stats:
+- mdts:             [ "/tmp/lfss-mdt1", "/tmp/lfss-mdt2" ]
+  snapshot_time:    1794691965
+  elapsed_time:     0.007
+  objects:          { seen: 6102, reported: 5586, skipped: 0 }
+  types:            { files: 5563, dirs: 12, dir_shards: 2, symlinks: 4, other: 2, unnamed: 0 }
+  size_source:      { exact: 1, lazy_som: 5562, unknown: 0 }
+  file_size:        { samples: 5563, unit: bytes, min: 0, max: 10485760, sum: 21287276, hist: { 0: 5503, 2: 2, 4: 11, 8: 35, 1K: 1, 2K: 1, 8K: 1, 16K: 1, 64K: 2, 128K: 1, 512K: 1, 1M: 1, 2M: 1, 4M: 1, 8M: 1 }, hist_bytes: { 0: 0, 2: 4, 4: 77, 8: 283, 1K: 1024, 2K: 3072, 8K: 9216, 16K: 27648, 64K: 185344, 128K: 248832, 512K: 746496, 1M: 1048576, 2M: 2239488, 4M: 6291456, 8M: 10485760 } }
+  file_allocated:   { samples: 5563, unit: bytes, min: 0, max: 4194304, sum: 4297216, hist: { 0: 5560, 512: 1, 64K: 1, 4M: 1 }, hist_bytes: { 0: 0, 512: 512, 64K: 102400, 4M: 4194304 } }
+  file_overhead:    { samples: 5504, unit: bytes, min: 0, max: 0, sum: 0, hist: { 0: 5504 }, hist_bytes: { 0: 0 } }
+  file_sparse:      { samples: 59, unit: bytes, min: 2, max: 10485248, sum: 16990060, hist: { 2: 2, 4: 11, 8: 35, 1K: 1, 2K: 1, 8K: 1, 16K: 1, 64K: 1, 128K: 1, 512K: 1, 1M: 1, 2M: 2, 8M: 1 }, hist_bytes: { 2: 4, 4: 77, 8: 283, 1K: 1024, 2K: 3072, 8K: 9216, 16K: 27648, 64K: 82944, 128K: 248832, 512K: 746496, 1M: 1048576, 2M: 4336640, 8M: 10485248 } }
+  dir_entries:      { samples: 12, unit: entries, min: 1, max: 3000, sum: 5584, hist: { 1: 2, 2: 2, 4: 2, 8: 2, 32: 1, 256: 1, 1K: 1, 2K: 1 } }
+  dir_size:         { samples: 12, unit: bytes, min: 4096, max: 135168, sum: 299008, hist: { 4K: 9, 16K: 1, 64K: 1, 128K: 1 } }
+  name_length:      { samples: 5584, unit: chars, min: 1, max: 200, sum: 25487, hist: { 1: 4, 2: 306, 4: 5237, 8: 35, 64: 1, 128: 1 } }
+  file_links:       { samples: 5563, unit: links, min: 1, max: 3, sum: 5567, hist: { 1: 5560, 2: 3 } }
+  symlink_length:   { samples: 4, unit: chars, min: 4, max: 150, sum: 185, hist: { 4: 1, 8: 1, 16: 1, 128: 1 } }
+  mtime_age:        { samples: 5563, unit: secs, min: 0, max: 172800001, sum: 212031461, hist: { 0: 5557, 1d: 2, 1w: 1, 1M: 1, 1y: 1, 5y: 1 }, hist_bytes: { 0: 21287227, 1d: 14, 1w: 8, 1M: 8, 1y: 9, 5y: 10 } }
+  ctime_age:        { samples: 5563, unit: secs, min: 0, max: 2, sum: 5859, hist: { 0: 5563 }, hist_bytes: { 0: 21287276 } }
+  atime_age:        { samples: 5563, unit: secs, min: 0, max: 86400001, sum: 105932261, hist: { 0: 5558, 1d: 2, 1w: 1, 6M: 1, 2y: 1 }, hist_bytes: { 0: 21287234, 1d: 15, 1w: 8, 6M: 9, 2y: 10 } }
+  largest_dirs_by_entries:
+  - { entries: 3000, file_bytes: 0, dir_size: 135168, path: "/big" }
+  - { entries: 2002, file_bytes: 0, dir_size: 98304, path: "/striped" }
+  - { entries: 501, file_bytes: 0, dir_size: 28672, path: "/remote" }
+  - { entries: 40, file_bytes: 311, dir_size: 4096, path: "/a/b2" }
+  - { entries: 13, file_bytes: 3358720, dir_size: 4096, path: "/a" }
+  - { entries: 9, file_bytes: 1150976, dir_size: 4096, path: "/docs" }
+  - { entries: 6, file_bytes: 49, dir_size: 4096, path: "/old" }
+  - { entries: 6, file_bytes: 0, dir_size: 4096, path: "/" }
+  - { entries: 3, file_bytes: 10485760, dir_size: 4096, path: "/a/b" }
+  - { entries: 2, file_bytes: 6291456, dir_size: 4096, path: "/a/b/c" }
+  - { entries: 1, file_bytes: 2, dir_size: 4096, path: "/remote/sub" }
+  - { entries: 1, file_bytes: 2, dir_size: 4096, path: "/striped/inner" }
+  largest_dirs_by_bytes:
+  - { entries: 3, file_bytes: 10485760, dir_size: 4096, path: "/a/b" }
+  - { entries: 2, file_bytes: 6291456, dir_size: 4096, path: "/a/b/c" }
+  - { entries: 13, file_bytes: 3358720, dir_size: 4096, path: "/a" }
+  - { entries: 9, file_bytes: 1150976, dir_size: 4096, path: "/docs" }
+  - { entries: 40, file_bytes: 311, dir_size: 4096, path: "/a/b2" }
+  - { entries: 6, file_bytes: 49, dir_size: 4096, path: "/old" }
+  - { entries: 1, file_bytes: 2, dir_size: 4096, path: "/remote/sub" }
+  - { entries: 1, file_bytes: 2, dir_size: 4096, path: "/striped/inner" }
+  - { entries: 501, file_bytes: 0, dir_size: 28672, path: "/remote" }
+  - { entries: 2002, file_bytes: 0, dir_size: 98304, path: "/striped" }
+  - { entries: 6, file_bytes: 0, dir_size: 4096, path: "/" }
+  - { entries: 3000, file_bytes: 0, dir_size: 135168, path: "/big" }

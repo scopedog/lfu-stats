@@ -35,8 +35,7 @@ sync; echo 3 | sudo tee /proc/sys/vm/drop_caches > /dev/null
 for th in 4 1 4; do
 	echo "== threads $th"
 	sudo env LD_LIBRARY_PATH=$L ./lfu-stats -t $th -n 5 \
-		-c scale-t$th.csv /tmp/lfsb-mdt1 > scale-t$th.txt
-	head -3 scale-t$th.txt
+		-c scale-t$th.csv /tmp/lfsb-mdt1 > scale-t$th.yaml
 done
 cmp scale-t1.csv scale-t4.csv && echo "csv: 1 and 4 threads identical"
-sed -n '/^largest 5 directories by entries/,/^$/p' scale-t4.txt
+sed -n '/largest_dirs_by_entries:/,/largest_dirs_by_bytes:/p' scale-t4.yaml

@@ -1,13 +1,14 @@
 # lfu-stats
 
-fsstats-style filesystem reports from a Lustre MDT scan, plus the largest
-directories.
+Filesystem statistics from a Lustre MDT scan: size, space, age and
+directory histograms, plus the largest directories, as YAML.
 
 `lfu-stats` reads one or more MDT devices, and optionally the OSTs, with
-`llapi_scan_device()` (LFU, LU-20462) and reports the attributes and histograms of
-[fsstats](https://github.com/adilger/fsstats), without walking the namespace
-from a client. It also lists the largest N directories, which fsstats does
-not have. This is a prototype.
+`llapi_scan_device()` (LFU, LU-20462), without walking the namespace from a
+client. It covers the attributes and histograms of
+[fsstats](https://github.com/adilger/fsstats), which served as the public
+reference, and adds the largest N directories. This is a prototype; the plan
+is to build it into `lfs find` as `--report`.
 
 ```
 lfu-stats [-t THREADS] [-n TOP] [-c CSVFILE] [--now EPOCH] [--ost OSTDEV]...
@@ -20,13 +21,49 @@ lfu-stats [-t THREADS] [-n TOP] [-c CSVFILE] [--now EPOCH] [--ost OSTDEV]...
   capacity used from their OST objects instead of the MDT's lazy SOM blocks.
   Give every OST for exact figures. A device given as the wrong kind of
   target is refused.
-- `-c` writes the histograms in fsstats' CSV format, so the output can be
-  diffed against fsstats run on the same filesystem.
+- `-c` also writes fsstats' histograms in its CSV format, so the result can
+  be diffed against fsstats run on the same filesystem (the lab check).
 - `--now` sets the reference time for the age histograms.
+
+## Output
+
+The report goes to standard output as YAML in the style of `job_stats`: one
+line per statistic, readable as it is and parseable by any YAML library. The
+run summary (objects/s, memory) goes to standard error. From
+`samples/dne-fixture.yaml`, shortened:
+
+```yaml
+scan_stats:
+- mdts:             [ "/tmp/lfss-mdt1", "/tmp/lfss-mdt2" ]
+  osts:             [ "/tmp/lfss-ost1", "/tmp/lfss-ost2" ]
+  snapshot_time:    1794691965
+  elapsed_time:     0.013
+  objects:          { seen: 12386, reported: 11284, skipped: 0 }
+  types:            { files: 5563, dirs: 12, dir_shards: 2, symlinks: 4, other: 2, unnamed: 0 }
+  size_source:      { exact: 1, lazy_som: 5562, unknown: 0 }
+  alloc_source:     { ost_objects: 61, lazy_som: 5501, dom_estimated: 1 }
+  file_size:        { samples: 5563, unit: bytes, min: 0, max: 10485760, sum: 21287276, hist: { 0: 5503, 2: 2, 4: 11, 8: 35, 1K: 1, ... }, hist_bytes: { ... } }
+  dir_entries:      { samples: 12, unit: entries, min: 1, max: 3000, sum: 5584, hist: { 1: 2, 2: 2, 4: 2, 8: 2, 32: 1, 256: 1, 1K: 1, 2K: 1 } }
+  mtime_age:        { samples: 5563, unit: secs, min: 0, max: 172800001, sum: 212031461, hist: { 0: 5557, 1d: 2, 1w: 1, 1M: 1, 1y: 1, 5y: 1 }, hist_bytes: { ... } }
+  largest_dirs_by_entries:
+  - { entries: 3000, file_bytes: 0, dir_size: 135168, path: "/big" }
+  - { entries: 2002, file_bytes: 0, dir_size: 98304, path: "/striped" }
+```
+
+- `hist` keys are each bucket's lower bound: powers of two (`1K` = 1024) as
+  in `job_stats`, or ages `1h 1d 1w 1M 3M 6M 1y 2y 5y 10y` (`future` for a
+  time ahead of `snapshot_time`). Byte-weighted statistics add `hist_bytes`,
+  the bytes in each bucket.
+- The statistics: `file_size`, `file_allocated`, `file_overhead` (allocated
+  beyond size), `file_sparse` (size beyond allocated), `dir_entries`,
+  `dir_size`, `name_length` (every name, hard links included), `file_links`,
+  `symlink_length`, and `mtime_age`, `ctime_age`, `atime_age` (regular files).
+- `size_source` and `alloc_source` count where each file's numbers came
+  from, so a reader can tell exact figures from lazy ones.
 
 ## Where each number comes from
 
-| fsstats histogram | MDT scan source | Accuracy |
+| fsstats histogram (YAML key) | MDT scan source | Accuracy |
 |---|---|---|
 | file size | `trusted.som`, or the inode for DoM | matched fsstats exactly in the lab |
 | capacity used, over/underhead | with `--ost`: the blocks of every OST object owned by the file (`trusted.fid`), as a client's `stat` sums them | matched exactly |

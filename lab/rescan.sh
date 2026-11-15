@@ -15,9 +15,9 @@ trap 'sudo umount $PLUG' EXIT
 cmp "$T/lustre/utils/scan_osd_ldiskfs.so" $PLUG
 run() { sudo env LD_LIBRARY_PATH=$L ./lfu-stats --now "$(cat now)" "$@"; }
 
-run -c lfu-mdtonly.csv /tmp/lfss-mdt1 /tmp/lfss-mdt2 > lfu-mdtonly.txt
+run -c lfu-mdtonly.csv /tmp/lfss-mdt1 /tmp/lfss-mdt2 > lfu-mdtonly.yaml
 run -c lfu.csv --ost /tmp/lfss-ost1 --ost /tmp/lfss-ost2 \
-	/tmp/lfss-mdt1 /tmp/lfss-mdt2 > lfu.txt
+	/tmp/lfss-mdt1 /tmp/lfss-mdt2 > lfu.yaml
 diff fsstats.csv lfu-mdtonly.csv > csv-mdtonly.diff || true
 diff fsstats.csv lfu.csv > csv.diff || true
 echo "diff lines: MDT only $(wc -l < csv-mdtonly.diff), with OSTs $(wc -l < csv.diff)"

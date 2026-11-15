@@ -42,6 +42,6 @@ sudo umount $PLUG
 bash "$W/rescan.sh" "$T" "$W"
 for i in 1 2; do
 	sudo env LD_LIBRARY_PATH=$LD_LIBRARY_PATH ./lfu-stats --now "$(cat now)" \
-		-c lfu-mdt$i.csv /tmp/lfss-mdt$i > lfu-mdt$i.txt
+		-c lfu-mdt$i.csv /tmp/lfss-mdt$i > lfu-mdt$i.yaml
 done
-sed -n 1,8p lfu.txt
+sed -n 1,10p lfu.yaml

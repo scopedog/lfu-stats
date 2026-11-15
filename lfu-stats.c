@@ -219,47 +219,171 @@ static const char *kb_str(double kb, char *buf, size_t len)
 	return buf;
 }
 
-static void histo_text(FILE *f, const struct histo *h, int i)
+/* ---------------------------------------------------------------- */
+/* job_stats-style histograms for the YAML report */
+
+enum { YK_LOG2, YK_AGE };
+
+enum {
+	Y_SIZE, Y_ALLOC, Y_OVHD, Y_SPARSE, Y_DIR_ENTS, Y_DIR_SIZE, Y_NAME,
+	Y_LINKS, Y_SLINK, Y_MTIME, Y_CTIME, Y_ATIME, Y_NR
+};
+
+static const struct {
+	const char *name, *unit;
+	int kind, weighted;
+} ydef[Y_NR] = {
+	[Y_SIZE]     = { "file_size", "bytes", YK_LOG2, 1 },
+	[Y_ALLOC]    = { "file_allocated", "bytes", YK_LOG2, 1 },
+	[Y_OVHD]     = { "file_overhead", "bytes", YK_LOG2, 1 },
+	[Y_SPARSE]   = { "file_sparse", "bytes", YK_LOG2, 1 },
+	[Y_DIR_ENTS] = { "dir_entries", "entries", YK_LOG2, 0 },
+	[Y_DIR_SIZE] = { "dir_size", "bytes", YK_LOG2, 0 },
+	[Y_NAME]     = { "name_length", "chars", YK_LOG2, 0 },
+	[Y_LINKS]    = { "file_links", "links", YK_LOG2, 0 },
+	[Y_SLINK]    = { "symlink_length", "chars", YK_LOG2, 0 },
+	[Y_MTIME]    = { "mtime_age", "secs", YK_AGE, 1 },
+	[Y_CTIME]    = { "ctime_age", "secs", YK_AGE, 1 },
+	[Y_ATIME]    = { "atime_age", "secs", YK_AGE, 1 },
+};
+
+/* age buckets: each label is the bucket's lower bound */
+static const struct {
+	int64_t secs;
+	const char *label;
+} age_bucket[] = {
+	{ 0, "0" }, { 3600, "1h" }, { 86400, "1d" }, { 604800, "1w" },
+	{ 2592000, "1M" }, { 7776000, "3M" }, { 15552000, "6M" },
+	{ 31536000, "1y" }, { 63072000, "2y" }, { 157680000, "5y" },
+	{ 315360000, "10y" },
+};
+#define AGE_NB	(sizeof(age_bucket) / sizeof(age_bucket[0]))
+
+#define YBUCKET	66	/* log2: 0, then [2^(n-1), 2^n) for n = 1..64 */
+
+struct yhist {
+	uint64_t	samples;
+	int64_t		min, max, sum;
+	uint64_t	b[YBUCKET], bb[YBUCKET];	/* count, bytes */
+};
+
+static int ybucket(int kind, int64_t v)
 {
-	double c = 0;
+	unsigned int i;
+
+	if (kind == YK_LOG2)
+		return v <= 0 ? 0 : 64 - __builtin_clzll((uint64_t)v);
+	if (v < 0)
+		return 0;		/* in the future */
+	for (i = 1; i < AGE_NB && v >= age_bucket[i].secs; i++)
+		;
+	return i;		/* 1 .. AGE_NB */
+}
+
+static void yh_add(struct yhist *h, int kind, int64_t v, uint64_t bytes)
+{
+	int b = ybucket(kind, v);
+
+	if (h->samples == 0 || v < h->min)
+		h->min = v;
+	if (h->samples == 0 || v > h->max)
+		h->max = v;
+	h->samples++;
+	h->sum += v;
+	h->b[b]++;
+	h->bb[b] += bytes;
+}
+
+static void yh_merge(struct yhist *d, const struct yhist *s)
+{
 	int b;
 
-	fprintf(f, "%s: %lld items, average %.2f %s, min %lld, max %lld\n",
-		hdef[i].title, (long long)h->count,
-		h->count > 0 ? h->total_val / h->count : 0, hdef[i].unit,
-		(long long)h->min_val, (long long)h->max_val);
-	if (h->count == 0) {
-		fprintf(f, "\n");
+	if (s->samples == 0)
 		return;
+	if (d->samples == 0 || s->min < d->min)
+		d->min = s->min;
+	if (d->samples == 0 || s->max > d->max)
+		d->max = s->max;
+	d->samples += s->samples;
+	d->sum += s->sum;
+	for (b = 0; b < YBUCKET; b++) {
+		d->b[b] += s->b[b];
+		d->bb[b] += s->bb[b];
 	}
-	fprintf(f, "  %12s %12s %12s %7s %7s %7s\n", "min", "max",
-		"count", "%", "cum%", "val%");
-	if (h->under_min > 0) {
-		c += h->under_min;
-		fprintf(f, "  %12s %12lld %12lld %6.2f%% %6.2f%% %6.2f%%\n",
-			"<", (long long)h->min, (long long)h->under_min,
-			100 * h->under_min / h->count, 100 * c / h->count,
-			h->total_val ? 100 * h->under_val / h->total_val : 0);
+}
+
+static const char *ylabel(int kind, int b, char *buf, size_t len)
+{
+	static const char sfx[] = "KMGTPE";
+	uint64_t x;
+	int k = -1;
+
+	if (kind == YK_AGE)
+		return b == 0 ? "future" : age_bucket[b - 1].label;
+	if (b == 0)
+		return "0";
+	x = 1ULL << (b - 1);
+	while (x >= 1024 && k < 5) {
+		x >>= 10;
+		k++;
 	}
-	for (b = 0; b < h->nb; b++) {
+	if (k < 0)
+		snprintf(buf, len, "%"PRIu64, x);
+	else
+		snprintf(buf, len, "%"PRIu64"%c", x, sfx[k]);
+	return buf;
+}
+
+static void yh_print_map(FILE *f, const struct yhist *h, int kind,
+			 const uint64_t *v)
+{
+	const char *sep = "";
+	char buf[32];
+	int b;
+
+	fprintf(f, "{ ");
+	for (b = 0; b < YBUCKET; b++) {
 		if (h->b[b] == 0)
 			continue;
-		c += h->b[b];
-		fprintf(f, "  %12lld %12lld %12lld %6.2f%% %6.2f%% %6.2f%%\n",
-			(long long)bucket_min(h, b),
-			(long long)bucket_max(h, b) + !h->integer_vals,
-			(long long)h->b[b], 100 * h->b[b] / h->count,
-			100 * c / h->count,
-			h->total_val ? 100 * h->bv[b] / h->total_val : 0);
+		fprintf(f, "%s%s: %"PRIu64, sep, ylabel(kind, b, buf,
+			sizeof(buf)), v[b]);
+		sep = ", ";
 	}
-	if (h->over_max > 0) {
-		c += h->over_max;
-		fprintf(f, "  %12lld %12s %12lld %6.2f%% %6.2f%% %6.2f%%\n",
-			(long long)h->max, ">", (long long)h->over_max,
-			100 * h->over_max / h->count, 100 * c / h->count,
-			h->total_val ? 100 * h->over_val / h->total_val : 0);
+	fprintf(f, " }");
+}
+
+static void yh_print(FILE *f, const struct yhist *h, int i)
+{
+	char key[32];
+
+	snprintf(key, sizeof(key), "%s:", ydef[i].name);
+	fprintf(f, "  %-17s { samples: %"PRIu64", unit: %s, min: %"PRId64
+		", max: %"PRId64", sum: %"PRId64", hist: ",
+		key, h->samples, ydef[i].unit, h->min, h->max,
+		h->sum);
+	yh_print_map(f, h, ydef[i].kind, h->b);
+	if (ydef[i].weighted) {
+		fprintf(f, ", hist_bytes: ");
+		yh_print_map(f, h, ydef[i].kind, h->bb);
 	}
-	fprintf(f, "\n");
+	fprintf(f, " }\n");
+}
+
+/* a YAML double-quoted scalar; bytes from 0x80 up are passed as UTF-8 */
+static void yaml_str(FILE *f, const char *str)
+{
+	const unsigned char *c;
+
+	fputc('"', f);
+	for (c = (const unsigned char *)str; *c != '\0'; c++) {
+		if (*c == '"' || *c == '\\')
+			fprintf(f, "\\%c", *c);
+		else if (*c < 0x20 || *c == 0x7f)
+			fprintf(f, "\\x%02x", *c);
+		else
+			fputc(*c, f);
+	}
+	fputc('"', f);
 }
 
 /* ---------------------------------------------------------------- */
@@ -447,6 +571,7 @@ struct tstate {
 	double		total_kb, total_cap_kb;
 	uint64_t	special, hlink_skipped, files, dirs_seen, symlinks;
 	uint64_t	shards, no_name, size_strict, size_lazy, size_none;
+	struct yhist	y[Y_NR];
 	/* OST pass */
 	struct otab	owners;
 	uint64_t	ost_objs, ost_unowned, ost_blocks;
@@ -633,6 +758,7 @@ static int scan_cb(const struct llapi_scan_rec *rec, void *data)
 			first_namelen = namelen;
 		}
 		histo_add(&t->h[H_FNAME], namelen, 1);
+		yh_add(&t->y[Y_NAME], YK_LOG2, namelen, 0);
 		dtab_get(&t->dirs, &parent)->nent++;
 	}
 	if (nlinks == 0 && !is_shard &&
@@ -730,6 +856,24 @@ static int scan_cb(const struct llapi_scan_rec *rec, void *data)
 		histo_add(&t->h[H_CTIME_B], age_days(st->stx_ctime.tv_sec), size_kb);
 		histo_add(&t->h[H_ATIME_F], age_days(st->stx_atime.tv_sec), 1);
 		histo_add(&t->h[H_ATIME_B], age_days(st->stx_atime.tv_sec), size_kb);
+		{
+			uint64_t sz = has_size ? st->stx_size : 0;
+			uint64_t al = (uint64_t)(cap_kb * 1024);
+
+			yh_add(&t->y[Y_SIZE], YK_LOG2, sz, sz);
+			yh_add(&t->y[Y_ALLOC], YK_LOG2, al, al);
+			if (al >= sz)
+				yh_add(&t->y[Y_OVHD], YK_LOG2, al - sz, al - sz);
+			else
+				yh_add(&t->y[Y_SPARSE], YK_LOG2, sz - al, sz - al);
+			yh_add(&t->y[Y_LINKS], YK_LOG2, st->stx_nlink, 0);
+			yh_add(&t->y[Y_MTIME], YK_AGE,
+			       now - st->stx_mtime.tv_sec, sz);
+			yh_add(&t->y[Y_CTIME], YK_AGE,
+			       now - st->stx_ctime.tv_sec, sz);
+			yh_add(&t->y[Y_ATIME], YK_AGE,
+			       now - st->stx_atime.tv_sec, sz);
+		}
 		if (nlinks > 0)
 			dtab_get(&t->dirs, &first_parent)->bytes +=
 				st->stx_size;
@@ -747,6 +891,7 @@ static int scan_cb(const struct llapi_scan_rec *rec, void *data)
 	case S_IFLNK:
 		t->symlinks++;
 		histo_add(&t->h[H_SLINK], st->stx_size, 1);
+		yh_add(&t->y[Y_SLINK], YK_LOG2, st->stx_size, 0);
 		break;
 	default:
 		t->special++;
@@ -824,16 +969,16 @@ static void print_top(FILE *f, const struct dtab *t, int n, int by)
 			v[k++] = &t->e[i];
 	top_by = by;
 	qsort(v, k, sizeof(*v), dent_cmp);
-	fprintf(f, "largest %d directories by %s:\n", n,
-		by ? "bytes of files directly in them" : "entries");
-	fprintf(f, "  %10s %14s %10s  %s\n", "entries", "file bytes",
-		"dir KB", "path");
+	fprintf(f, "  %s:\n", by ? "largest_dirs_by_bytes" :
+				   "largest_dirs_by_entries");
 	for (i = 0; i < k && (int)i < n; i++) {
 		dir_path(t, v[i], path, sizeof(path));
-		fprintf(f, "  %10"PRIu64" %14"PRIu64" %10"PRIu64"  %s\n",
-			v[i]->nent, v[i]->bytes, v[i]->dsize / 1024, path);
+		fprintf(f, "  - { entries: %"PRIu64", file_bytes: %"PRIu64
+			", dir_size: %"PRIu64", path: ", v[i]->nent,
+			v[i]->bytes, v[i]->dsize);
+		yaml_str(f, path);
+		fprintf(f, " }\n");
 	}
-	fprintf(f, "\n");
 	free(v);
 }
 
@@ -844,11 +989,12 @@ static void usage(const char *prog)
 	fprintf(stderr,
 "usage: %s [-t THREADS] [-n TOP] [-c CSVFILE] [--now EPOCH] [--ost OSTDEV]...\n"
 "       MDTDEV...\n"
-"  Scan each MDT (unmounted, or a snapshot) and report fsstats-style\n"
-"  histograms plus the largest TOP directories (default 20).  Several MDTs\n"
+"  Scan each MDT (unmounted, or a snapshot) and print a YAML report of\n"
+"  histograms and the largest TOP directories (default 20).  Several MDTs\n"
 "  of one filesystem merge into one report.  With --ost, each OST given is\n"
 "  scanned first and files take their capacity from their OST objects\n"
-"  instead of the MDT's lazy size-on-MDT; give every OST for exact figures.\n",
+"  instead of the MDT's lazy size-on-MDT; give every OST for exact figures.\n"
+"  -c writes the fsstats 1.4.5 histograms as CSV, for comparison with it.\n",
 		prog);
 }
 
@@ -870,7 +1016,7 @@ int main(int argc, char **argv)
 	uint64_t unmatched_objs = 0, unmatched_blocks = 0;
 	struct timespec t0, t1;
 	uint64_t seen = 0, emitted = 0, skipped = 0;
-	char b1[32], b2[32];
+	char b1[32];
 	struct rusage ru;
 	double secs;
 	size_t j;
@@ -997,6 +1143,8 @@ int main(int argc, char **argv)
 	for (t = ts_list; t != NULL; t = t->next) {
 		for (i = 0; i < H_NR; i++)
 			histo_merge(&all.h[i], &t->h[i]);
+		for (i = 0; i < Y_NR; i++)
+			yh_merge(&all.y[i], &t->y[i]);
 		all.total_kb += t->total_kb;
 		all.total_cap_kb += t->total_cap_kb;
 		all.special += t->special;
@@ -1050,6 +1198,8 @@ int main(int argc, char **argv)
 			continue;
 		histo_add(&all.h[H_DIR_ENTS], d->nent, 1);
 		histo_add(&all.h[H_DIR_KB], d->dsize / 1024.0, 1);
+		yh_add(&all.y[Y_DIR_ENTS], YK_LOG2, d->nent, 0);
+		yh_add(&all.y[Y_DIR_SIZE], YK_LOG2, d->dsize, 0);
 		if (d->flags & D_STRIPED) {
 			double size_kb = d->dsize / 1024.0;
 			double cap_kb = d->dblocks / 2.0;
@@ -1094,42 +1244,51 @@ int main(int argc, char **argv)
 			fclose(f);
 	}
 
-	getrusage(RUSAGE_SELF, &ru);
-	printf("lfu-stats: %d device(s), %"PRIu64" objects seen, %"PRIu64
-	       " reported, %"PRIu64" skipped, %.2f s (%.0f objects/s), "
-	       "max RSS %ld MB\n", argc - optind + nost, seen, emitted, skipped,
-	       secs, secs > 0 ? seen / secs : 0, ru.ru_maxrss / 1024);
-	printf("%"PRIu64" files, %"PRIu64" directories (%"PRIu64" shards), "
-	       "%"PRIu64" symlinks, %"PRIu64" other; %"PRIu64" without a name\n",
-	       all.files, all.dirs_seen, all.shards, all.symlinks, all.special,
-	       all.no_name);
-	printf("file sizes: %"PRIu64" strict SOM or inode, %"PRIu64" lazy SOM, "
-	       "%"PRIu64" unknown (counted as 0)\n",
-	       all.size_strict, all.size_lazy, all.size_none);
-	if (have_ost) {
-		printf("OST pass: %d OST(s), %"PRIu64" objects, %s; %"PRIu64
-		       " without an owner\n", nost, all.ost_objs,
-		       kb_str(all.ost_blocks / 2.0, b1, sizeof(b1)),
-		       all.ost_unowned);
-		printf("capacity: %"PRIu64" files from their OST objects; %"
-		       PRIu64" from lazy SOM, having no owned OST object (never"
-		       " written, or on an OST not given); %"PRIu64" with DoM"
-		       " and OST data, the MDT part estimated from the DoM size\n",
-		       all.cap_ost, all.cap_lazy, all.dom_plus_ost);
-		printf("OST objects owned by no scanned MDT file: %"PRIu64", %s\n",
-		       unmatched_objs, kb_str(unmatched_blocks / 2.0, b1,
-					     sizeof(b1)));
+	printf("scan_stats:\n");
+	printf("- %-17s [ ", "mdts:");
+	for (i = optind; i < argc; i++) {
+		yaml_str(stdout, argv[i]);
+		printf(i + 1 < argc ? ", " : " ]\n");
 	}
-	printf("total %s used to store %s user data, overhead %.2f%%\n\n",
-	       kb_str(all.total_cap_kb, b1, sizeof(b1)),
-	       kb_str(all.total_kb, b2, sizeof(b2)),
-	       all.total_cap_kb ? 100 * (all.total_cap_kb - all.total_kb) /
-	       all.total_cap_kb : 0);
-	for (i = 0; i < H_NR; i++)
-		histo_text(stdout, &all.h[i], i);
+	if (have_ost) {
+		printf("  %-17s [ ", "osts:");
+		for (i = 0; i < nost; i++) {
+			yaml_str(stdout, osts[i]);
+			printf(i + 1 < nost ? ", " : " ]\n");
+		}
+	}
+	printf("  %-17s %lld\n", "snapshot_time:", (long long)now);
+	printf("  %-17s %.3f\n", "elapsed_time:", secs);
+	printf("  %-17s { seen: %"PRIu64", reported: %"PRIu64", skipped: %"
+	       PRIu64" }\n", "objects:", seen, emitted, skipped);
+	printf("  %-17s { files: %"PRIu64", dirs: %"PRIu64", dir_shards: %"
+	       PRIu64", symlinks: %"PRIu64", other: %"PRIu64", unnamed: %"
+	       PRIu64" }\n", "types:", all.files, all.dirs_seen, all.shards,
+	       all.symlinks, all.special, all.no_name);
+	/* where file_size and file_allocated came from */
+	printf("  %-17s { exact: %"PRIu64", lazy_som: %"PRIu64", unknown: %"
+	       PRIu64" }\n", "size_source:", all.size_strict, all.size_lazy,
+	       all.size_none);
+	if (have_ost) {
+		printf("  %-17s { ost_objects: %"PRIu64", lazy_som: %"PRIu64
+		       ", dom_estimated: %"PRIu64" }\n", "alloc_source:",
+		       all.cap_ost, all.cap_lazy, all.dom_plus_ost);
+		printf("  %-17s { count: %"PRIu64", bytes: %"PRIu64
+		       ", unowned: %"PRIu64", unmatched: %"PRIu64
+		       ", unmatched_bytes: %"PRIu64" }\n", "ost_objects:",
+		       all.ost_objs, all.ost_blocks * 512, all.ost_unowned,
+		       unmatched_objs, unmatched_blocks * 512);
+	}
+	for (i = 0; i < Y_NR; i++)
+		yh_print(stdout, &all.y[i], i);
 	if (top > 0) {
 		print_top(stdout, &all.dirs, top, 0);
 		print_top(stdout, &all.dirs, top, 1);
 	}
+
+	getrusage(RUSAGE_SELF, &ru);
+	fprintf(stderr, "lfu-stats: %d device(s), %"PRIu64" objects, %.2f s "
+		"(%.0f objects/s), max RSS %ld MB\n", argc - optind + nost,
+		seen, secs, secs > 0 ? seen / secs : 0, ru.ru_maxrss / 1024);
 	return 0;
 }

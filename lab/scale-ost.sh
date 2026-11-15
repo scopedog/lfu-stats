@@ -36,10 +36,9 @@ for r in 1 2; do
 	for th in 1 4; do
 		echo "== round $r, threads $th: MDT only, then with the OST"
 		sudo env LD_LIBRARY_PATH=$L ./lfu-stats -t $th -n 0 \
-			/tmp/lfsc-mdt1 > scale-ost-mdt-t$th.txt
-		head -1 scale-ost-mdt-t$th.txt
+			/tmp/lfsc-mdt1 > scale-ost-mdt-t$th.yaml
 		sudo env LD_LIBRARY_PATH=$L ./lfu-stats -t $th -n 0 \
-			--ost /tmp/lfsc-ost1 /tmp/lfsc-mdt1 > scale-ost-t$th.txt
-		sed -n '1p;4,6p' scale-ost-t$th.txt
+			--ost /tmp/lfsc-ost1 /tmp/lfsc-mdt1 > scale-ost-t$th.yaml
+		grep -E "alloc_source|ost_objects" scale-ost-t$th.yaml
 	done
 done
